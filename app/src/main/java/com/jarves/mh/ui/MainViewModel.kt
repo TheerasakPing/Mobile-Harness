@@ -371,6 +371,7 @@ data class AppUiState(
     val agentUpdating: AgentKind? = null,
     val agentUpdateMessage: String? = null,
     val agentUpdateProgress: Float = 0f,
+    val agentUpdateIndeterminate: Boolean = false,
     val agentUpdateDownloadedBytes: Long? = null,
     val agentUpdateTotalBytes: Long? = null,
     val agentUpdateBytesPerSecond: Long? = null,
@@ -2150,8 +2151,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 setupCompletionHandled = true
                 preferences.runtimeSetupComplete = true
                 viewModelScope.launch {
-                    val installedStacks = withContext(Dispatchers.IO) { installer.installedStacks() }
-                    _state.update { it.copy(installedDevStacks = installedStacks) }
+                    val (installedStacks, installedAgents) = withContext(Dispatchers.IO) {
+                        installer.installedStacks() to installer.installedAgentVersions()
+                    }
+                    _state.update {
+                        it.copy(
+                            installedDevStacks = installedStacks,
+                            installedAgentVersions = installedAgents,
+                        )
+                    }
                     if (preferences.onboardingComplete) {
                         initializeRuntime()
                     } else {
@@ -2502,6 +2510,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 agentUpdating = kind,
                 agentUpdateMessage = str(R.string.vm_preparing_version, kind.localizedTitle(getApplication()), update.latestVersion),
                 agentUpdateProgress = 0f,
+                agentUpdateIndeterminate = false,
                 agentUpdateDownloadedBytes = null,
                 agentUpdateTotalBytes = null,
                 agentUpdateBytesPerSecond = null,
@@ -2526,6 +2535,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             it.copy(
                                 agentUpdateMessage = progress.message,
                                 agentUpdateProgress = progress.fraction.coerceIn(0f, 1f),
+                                agentUpdateIndeterminate = progress.indeterminate,
                                 agentUpdateDownloadedBytes = bytes ?: it.agentUpdateDownloadedBytes,
                                 agentUpdateTotalBytes = progress.totalBytes ?: it.agentUpdateTotalBytes,
                                 agentUpdateBytesPerSecond = speed,
@@ -2544,6 +2554,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         onFailure = { error -> error.message?.take(220) ?: str(R.string.vm_update_failed_named, kind.localizedTitle(getApplication())) },
                     ),
                     agentUpdateProgress = if (result.isSuccess) 1f else 0f,
+                    agentUpdateIndeterminate = false,
                     agentUpdateDownloadedBytes = null,
                     agentUpdateTotalBytes = null,
                     agentUpdateBytesPerSecond = null,

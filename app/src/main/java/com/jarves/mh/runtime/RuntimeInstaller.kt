@@ -47,6 +47,9 @@ data class AgentUpdateInfo(
     val latestVersion: String,
 )
 
+internal fun isSupportedDshVersion(version: String): Boolean =
+    version == RuntimeInstaller.DSH_VERSION
+
 enum class RuntimeInstallEvent { STAGE, COMMAND, OUTPUT, DOWNLOAD, COMMAND_COMPLETED, COMPLETED }
 
 private data class RuntimeBundle(
@@ -267,7 +270,7 @@ class RuntimeInstaller(private val context: Context) {
                 // /usr/local/bin/dsh is an absolute guest symlink. File.exists() follows it
                 // against Android's host root and therefore reports false outside PRoot.
                 File(rootfs, "usr/local/lib/dsh/node_modules/.bin/dsh").isFile &&
-                !dshMarker.readTextOrNull().isNullOrBlank()
+                isSupportedDshVersion(dshMarker.readTextOrNull().orEmpty())
             com.jarves.mh.model.AgentKind.ANTIGRAVITY -> isInstalled() &&
                 File(rootfs, AGY_GUEST_PATH.removePrefix("/")).canExecute() &&
                 !agyMarker.readTextOrNull().isNullOrBlank()
@@ -352,7 +355,7 @@ class RuntimeInstaller(private val context: Context) {
 
         dshMarker.readTextOrNull()
             ?.trim()
-            ?.takeIf { it.isNotEmpty() && File(rootfs, "usr/local/lib/dsh/node_modules/.bin/dsh").isFile }
+            ?.takeIf { isAgentInstalled(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS) }
             ?.let { put(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS, it) }
 
         agyMarker.readTextOrNull()
@@ -373,10 +376,11 @@ class RuntimeInstaller(private val context: Context) {
                 }
             }
             installed[com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS]?.let { current ->
-                runCatching {
-                    JSONObject(fetchText("https://registry.npmjs.org/@deepseek-ai/dsh/latest")).getString("version")
-                }.getOrNull()?.takeIf { isVersionNewer(it, current) }?.let { latest ->
-                    put(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS, AgentUpdateInfo(current, latest))
+                // DSH needs Android-specific filesystem patches. Only advertise the
+                // release validated and bundled with this PocketDev build; npm's
+                // latest tag may point at a source layout we cannot safely patch.
+                DSH_VERSION.takeIf { isVersionNewer(it, current) }?.let { compatible ->
+                    put(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS, AgentUpdateInfo(current, compatible))
                 }
             }
             installed[com.jarves.mh.model.AgentKind.ANTIGRAVITY]?.let { current ->
@@ -470,29 +474,57 @@ class RuntimeInstaller(private val context: Context) {
         expectedVersion: String,
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ) {
-        val latest = JSONObject(fetchText("https://registry.npmjs.org/@deepseek-ai/dsh/latest")).getString("version")
-        check(latest == expectedVersion) { str(R.string.rt_install_newer_release, "DeepSeek Harness") }
-        val quotedVersion = latest.replace(Regex("[^0-9A-Za-z.+-]"), "")
-        check(quotedVersion == latest) { "Invalid DeepSeek Harness version" }
+        check(isSupportedDshVersion(expectedVersion)) {
+            "DeepSeek Harness $expectedVersion is not compatible with this PocketDev build"
+        }
+        val quotedVersion = expectedVersion.replace(Regex("[^0-9A-Za-z.+-]"), "")
+        check(quotedVersion == expectedVersion) { "Invalid DeepSeek Harness version" }
         runGuestCommand(
             proot = runtime.proot,
-            command = "set -e; next=/usr/local/lib/dsh.updating; old=/usr/local/lib/dsh.previous; " +
-                "rm -rf \"${'$'}next\" \"${'$'}old\"; mkdir -p \"${'$'}next\"; " +
+            command = "set -e; next=/usr/local/lib/dsh.updating; " +
+                "rm -rf \"${'$'}next\"; mkdir -p \"${'$'}next\"; " +
                 "cd \"${'$'}next\"; npm init -y >/dev/null; " +
-                "npm install --omit=dev --no-audit --no-fund @deepseek-ai/dsh@$quotedVersion; " +
-                "mv /usr/local/lib/dsh \"${'$'}old\"; " +
-                "if mv \"${'$'}next\" /usr/local/lib/dsh; then rm -rf \"${'$'}old\"; " +
-                "else mv \"${'$'}old\" /usr/local/lib/dsh; exit 1; fi",
+                "npm install --omit=dev --no-audit --no-fund @deepseek-ai/dsh@$quotedVersion",
             displayCommand = "npm install @deepseek-ai/dsh@$quotedVersion",
             fraction = 0.55f,
             timeoutMs = 20 * 60 * 1_000L,
             onProgress = onProgress,
             failureMessage = str(R.string.rt_install_dsh_update_failed),
         )
-        dshMarker.writeText(latest)
-        dshAndroidCompatibilityMarker.delete()
-        ensureDshAndroidCompatibility()
-        verifyGuest(runtime.proot, "/usr/local/bin/dsh --profile headless --help", str(R.string.rt_install_update_verify_failed, "DeepSeek Harness"))
+        val staged = File(rootfs, "usr/local/lib/dsh.updating")
+        applyDshAndroidCompatibility(staged, expectedVersion)
+        runGuestCommand(
+            proot = runtime.proot,
+            command = "set -e; old=/usr/local/lib/dsh.previous; rm -rf \"${'$'}old\"; " +
+                "mv /usr/local/lib/dsh \"${'$'}old\"; " +
+                "if mv /usr/local/lib/dsh.updating /usr/local/lib/dsh; then :; " +
+                "else mv \"${'$'}old\" /usr/local/lib/dsh; exit 1; fi",
+            displayCommand = "Activate DeepSeek Harness $quotedVersion",
+            fraction = 0.9f,
+            timeoutMs = 60_000L,
+            onProgress = onProgress,
+            failureMessage = str(R.string.rt_install_dsh_update_failed),
+        )
+        val verified = runCatching {
+            verifyGuest(runtime.proot, "/usr/local/bin/dsh --profile headless --help", str(R.string.rt_install_update_verify_failed, "DeepSeek Harness"))
+        }
+        if (verified.isFailure) {
+            runCatching {
+                runGuestCommand(
+                    proot = runtime.proot,
+                    command = "set -e; rm -rf /usr/local/lib/dsh; mv /usr/local/lib/dsh.previous /usr/local/lib/dsh",
+                    displayCommand = "Restore previous DeepSeek Harness",
+                    fraction = 0.95f,
+                    timeoutMs = 60_000L,
+                    onProgress = onProgress,
+                    failureMessage = str(R.string.rt_install_dsh_update_failed),
+                )
+            }
+            verified.getOrThrow()
+        }
+        File(rootfs, "usr/local/lib/dsh.previous").deleteRecursively()
+        dshMarker.writeText(expectedVersion)
+        dshAndroidCompatibilityMarker.writeText(DSH_ANDROID_COMPATIBILITY_VERSION)
     }
 
     private fun fetchAgyManifest(): JSONObject = JSONObject(
@@ -581,6 +613,14 @@ class RuntimeInstaller(private val context: Context) {
             ensureDshAndroidCompatibility()
             return
         }
+        // Remove partial or unsupported npm updates before restoring the bundled,
+        // Android-validated release. The user can recover simply by launching DSH
+        // again; project files and conversations live outside this overlay.
+        File(rootfs, "usr/local/lib/dsh").deleteRecursively()
+        File(rootfs, "usr/local/lib/dsh.updating").deleteRecursively()
+        File(rootfs, "usr/local/lib/dsh.previous").deleteRecursively()
+        dshMarker.delete()
+        dshAndroidCompatibilityMarker.delete()
         installRuntimeOverlay(
             bundle = DSH_BUNDLE,
             message = str(R.string.rt_install_installing_version, "DeepSeek Harness", DSH_VERSION),
@@ -606,13 +646,21 @@ class RuntimeInstaller(private val context: Context) {
      */
     fun ensureDshAndroidCompatibility() {
         if (!isAgentInstalled(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS)) return
+        applyDshAndroidCompatibility(File(rootfs, "usr/local/lib/dsh"), dshMarker.readTextOrNull().orEmpty())
+        dshAndroidCompatibilityMarker.writeText(DSH_ANDROID_COMPATIBILITY_VERSION)
+    }
+
+    private fun applyDshAndroidCompatibility(dshRoot: File, version: String) {
+        check(isSupportedDshVersion(version)) {
+            "DeepSeek Harness $version is not compatible with this PocketDev build"
+        }
         val persistence = File(
-            rootfs,
-            "usr/local/lib/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+            dshRoot,
+            "node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
         )
         val localFs = File(
-            rootfs,
-            "usr/local/lib/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js",
+            dshRoot,
+            "node_modules/@deepseek-ai/dsh-fs-local/lib/index.js",
         )
         patchDshHardLinkPublication(
             file = persistence,
@@ -628,7 +676,6 @@ class RuntimeInstaller(private val context: Context) {
             callBefore = "await linkFile(tempPath, absolutePath);",
             callAfter = "await copyFile(tempPath, absolutePath, 1);",
         )
-        dshAndroidCompatibilityMarker.writeText(DSH_ANDROID_COMPATIBILITY_VERSION)
     }
 
     private fun patchDshHardLinkPublication(
@@ -642,7 +689,7 @@ class RuntimeInstaller(private val context: Context) {
         var source = file.readText()
         if (callAfter in source && importAfter in source) return
         check(callBefore in source && importBefore in source) {
-            "DeepSeek Harness $DSH_VERSION is not compatible with this PocketDev build"
+            "Installed DeepSeek Harness source is not compatible with this PocketDev build"
         }
         source = source.replace(importBefore, importAfter).replace(callBefore, callAfter)
         file.writeText(source)

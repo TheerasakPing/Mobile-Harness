@@ -238,8 +238,7 @@ fun AgentScreen(
     val orderedAgents = remember(state.primaryAgentKind) {
         listOf(state.primaryAgentKind) + AgentKind.entries.filterNot { it == state.primaryAgentKind }
     }
-    val viewedAgentInstalled = viewedAgent == state.agentKind ||
-        state.installedAgentVersions.containsKey(viewedAgent)
+    val viewedAgentInstalled = state.installedAgentVersions.containsKey(viewedAgent)
 
     val providerSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val antigravitySheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -846,7 +845,8 @@ fun AgentScreen(
                         ) {
                             orderedAgents.forEach { agent ->
                                 val isSelected = viewedAgent == agent
-                                val isInstalled = agent == state.agentKind || state.installedAgentVersions.containsKey(agent)
+                                val installedVersion = state.installedAgentVersions[agent]
+                                val isInstalled = installedVersion != null
                                 val updateAvailable = state.agentUpdates.containsKey(agent)
                                 val shortTitle = when (agent) {
                                     AgentKind.ANTIGRAVITY -> "Antigravity"
@@ -2073,7 +2073,36 @@ private fun AgentUpdateBlock(
                         }
                         if (updating) {
                             state.agentUpdateMessage?.let { Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                            LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                            if (state.agentUpdateIndeterminate) {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            } else {
+                                LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                            }
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (downloaded != null || total != null) {
+                                        buildString {
+                                            append(formatAgentBytes(downloaded ?: 0L))
+                                            total?.let { append(" / ${formatAgentBytes(it)}") }
+                                        }
+                                    } else {
+                                        stringResource(R.string.st_processing_files)
+                                    },
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    buildString {
+                                        append("${(fraction * 100).toInt()}%")
+                                        state.agentUpdateBytesPerSecond?.takeIf { it > 0L }?.let {
+                                            append(" · ${formatAgentBytes(it)}/s")
+                                        }
+                                    },
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         } else {
                             Button(
                                 onClick = { onUpdate(agent) },
