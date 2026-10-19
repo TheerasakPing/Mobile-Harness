@@ -122,6 +122,9 @@ android {
 
     buildTypes {
         debug {
+            // Alpha builds are separately installable; never replace the upstream app or its data.
+            applicationIdSuffix = ".advanced"
+            versionNameSuffix = "-advanced-alpha"
             buildConfigField(
                 "String",
                 "TEST_OPENROUTER_API_KEY",
