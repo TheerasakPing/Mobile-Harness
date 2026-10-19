@@ -337,10 +337,11 @@ class AntigravityRuntimeBridge(
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
         if (!installer.isAgentInstalled(com.jarves.mh.model.AgentKind.ANTIGRAVITY)) {
             emitFailure(sessionId, "Antigravity CLI is not installed. Open Settings → Coding agent to install it.")
-            RuntimeTaskController.release(sessionId)
+            RuntimeTaskController.finish(sessionId, SessionLifecycle.FAILED)
             return@withContext sessionId
         }
 
+        var sessionSucceeded = false
         runCatching {
             startForegroundRuntime(projectSlug)
             pushForegroundProgress(R.string.rt_bridge_starting, "Antigravity")
@@ -468,6 +469,7 @@ class AntigravityRuntimeBridge(
             if (paths.isNotEmpty()) {
                 eventBus.emit(RuntimeEvent.FilesChanged(sessionId, checkpoints.buildChangeDetails(projectId, workspace, paths)))
             }
+            sessionSucceeded = true
             emitCompleted(sessionId)
             finishForegroundRuntime(true, projectSlug, AppStrings.get(context, R.string.rt_bridge_finished_in, "Antigravity", projectSlug))
         }.onFailure {
@@ -485,7 +487,11 @@ class AntigravityRuntimeBridge(
         activeSessionId = null
         activeProjectSlug = ""
         taskStartedAtElapsedRealtime = 0L
-        RuntimeTaskController.release(sessionId)
+        RuntimeTaskController.finish(sessionId, when {
+            userStopRequested -> SessionLifecycle.CANCELLED
+            sessionSucceeded -> SessionLifecycle.COMPLETED
+            else -> SessionLifecycle.FAILED
+        })
         sessionId
     }
 
