@@ -95,6 +95,20 @@ class ClaudeRuntimeBridge(
 
     override suspend fun startSession(projectId: String, projectSlug: String, projectKind: ProjectKind, prompt: String, conversationHistory: List<ChatMessage>, provider: ProviderProfile): String = withContext(Dispatchers.IO + NonCancellable) {
         val sessionId = UUID.randomUUID().toString()
+        if (!RuntimeTaskController.register(sessionId, projectId, "claude-code") {
+                    userStopRequested = true
+                    val running = activeProcess
+                    if (running != null) {
+                        Thread {
+                            running.destroy()
+                            Thread.sleep(500)
+                            if (running.isAlive) running.destroyForcibly()
+                        }.start()
+                    }
+        }) {
+            eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "Another task is running for this project or agent"))
+            return@withContext sessionId
+        }
         finishedSessions.remove(sessionId)
         activeSessionId = sessionId
         userStopRequested = false
@@ -119,23 +133,14 @@ class ClaudeRuntimeBridge(
                 "No API key is saved for ${provider.kind.title}."
             }
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, message))
+            RuntimeTaskController.finish(sessionId, SessionLifecycle.FAILED)
             return@withContext sessionId
         }
 
+        var sessionSucceeded = false
         var formatGateway: LocalFormatGateway? = null
         var openRouterGateway: OpenRouterRoutingGateway? = null
         runCatching {
-            RuntimeTaskController.stopAction = {
-                userStopRequested = true
-                val running = activeProcess
-                if (running != null) {
-                    Thread {
-                        running.destroy()
-                        Thread.sleep(500)
-                        if (running.isAlive) running.destroyForcibly()
-                    }.start()
-                }
-            }
             startForegroundRuntime(projectSlug)
             // Setup and release checks happen once in the app-start loading flow.
             // Sending a prompt must never perform network update checks or put setup
@@ -253,6 +258,7 @@ class ClaudeRuntimeBridge(
                     acceptLastChanges(projectId)
                 }
                 if (exit == 0) {
+                    sessionSucceeded = true
                     emitCompletedOnce(sessionId)
                     finishForegroundRuntime(
                         completed = true,
@@ -282,7 +288,11 @@ class ClaudeRuntimeBridge(
         openRouterGateway?.close()
         activeProcess = null
         activeSessionId = null
-        RuntimeTaskController.stopAction = null
+        RuntimeTaskController.finish(sessionId, when {
+            userStopRequested -> SessionLifecycle.CANCELLED
+            sessionSucceeded -> SessionLifecycle.COMPLETED
+            else -> SessionLifecycle.FAILED
+        })
         sessionId
     }
 
@@ -1030,6 +1040,7 @@ class ClaudeRuntimeBridge(
             context.startService(
                 android.content.Intent(context, RuntimeExecutionService::class.java)
                     .setAction(RuntimeExecutionService.ACTION_PROGRESS)
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
                     .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, activeProjectSlug)
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, text),
             )
@@ -1065,7 +1076,8 @@ class ClaudeRuntimeBridge(
             context,
             android.content.Intent(context, RuntimeExecutionService::class.java)
                 .setAction(RuntimeExecutionService.ACTION_START)
-                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
+                .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
+                    .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
         )
     }
 
@@ -1080,6 +1092,7 @@ class ClaudeRuntimeBridge(
                         if (completed) RuntimeExecutionService.ACTION_COMPLETE
                         else RuntimeExecutionService.ACTION_FAILED,
                     )
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
                     .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName)
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, detail),
             )
@@ -1095,7 +1108,8 @@ class ClaudeRuntimeBridge(
         runCatching {
             context.startService(
                 android.content.Intent(context, RuntimeExecutionService::class.java)
-                    .setAction(RuntimeExecutionService.ACTION_CANCELLED),
+                    .setAction(RuntimeExecutionService.ACTION_CANCELLED)
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId),
             )
         }.onFailure {
             context.stopService(android.content.Intent(context, RuntimeExecutionService::class.java))

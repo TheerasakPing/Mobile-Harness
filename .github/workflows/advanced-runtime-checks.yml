@@ -1,0 +1,72 @@
+name: Advanced Runtime Checks
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "gradlew"
+      - ".github/workflows/advanced-runtime-checks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: advanced-runtime-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-unit:
+    name: Kotlin Android unit tests
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install pinned Android toolchain
+        run: |
+          SDK_MANAGER="$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | head -n 1)"
+          test -x "$SDK_MANAGER"
+          "$SDK_MANAGER" --install "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+      - name: Run online debug unit tests
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:testOnlineDebugUnitTest --no-daemon --max-workers=2 --stacktrace
+
+  android-apk:
+    name: Android online debug APK
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install pinned Android toolchain
+        run: |
+          SDK_MANAGER="$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | head -n 1)"
+          test -x "$SDK_MANAGER"
+          "$SDK_MANAGER" --install "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+      - name: Assemble APK and lint
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleOnlineDebug :app:lintOnlineDebug --no-daemon --max-workers=2 --stacktrace
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: mobile-harness-advanced-online-debug
+          path: app/build/outputs/apk/online/debug/*.apk

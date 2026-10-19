@@ -319,6 +319,13 @@ class AntigravityRuntimeBridge(
         provider: ProviderProfile,
     ): String = withContext(Dispatchers.IO + NonCancellable) {
         val sessionId = UUID.randomUUID().toString()
+        if (!RuntimeTaskController.register(sessionId, projectId, "antigravity") {
+                    userStopRequested = true
+                    activeProcess?.destroy()
+        }) {
+            eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "Another task is running for this project or agent"))
+            return@withContext sessionId
+        }
         val sessionStartedAtMillis = System.currentTimeMillis()
         activeSessionId = sessionId
         userStopRequested = false
@@ -330,14 +337,12 @@ class AntigravityRuntimeBridge(
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
         if (!installer.isAgentInstalled(com.jarves.mh.model.AgentKind.ANTIGRAVITY)) {
             emitFailure(sessionId, "Antigravity CLI is not installed. Open Settings → Coding agent to install it.")
+            RuntimeTaskController.finish(sessionId, SessionLifecycle.FAILED)
             return@withContext sessionId
         }
 
+        var sessionSucceeded = false
         runCatching {
-            RuntimeTaskController.stopAction = {
-                userStopRequested = true
-                activeProcess?.destroy()
-            }
             startForegroundRuntime(projectSlug)
             pushForegroundProgress(R.string.rt_bridge_starting, "Antigravity")
             val installed = installer.installedRuntime()
@@ -464,6 +469,7 @@ class AntigravityRuntimeBridge(
             if (paths.isNotEmpty()) {
                 eventBus.emit(RuntimeEvent.FilesChanged(sessionId, checkpoints.buildChangeDetails(projectId, workspace, paths)))
             }
+            sessionSucceeded = true
             emitCompleted(sessionId)
             finishForegroundRuntime(true, projectSlug, AppStrings.get(context, R.string.rt_bridge_finished_in, "Antigravity", projectSlug))
         }.onFailure {
@@ -481,7 +487,11 @@ class AntigravityRuntimeBridge(
         activeSessionId = null
         activeProjectSlug = ""
         taskStartedAtElapsedRealtime = 0L
-        RuntimeTaskController.stopAction = null
+        RuntimeTaskController.finish(sessionId, when {
+            userStopRequested -> SessionLifecycle.CANCELLED
+            sessionSucceeded -> SessionLifecycle.COMPLETED
+            else -> SessionLifecycle.FAILED
+        })
         sessionId
     }
 
@@ -565,7 +575,8 @@ class AntigravityRuntimeBridge(
             context,
             android.content.Intent(context, RuntimeExecutionService::class.java)
                 .setAction(RuntimeExecutionService.ACTION_START)
-                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
+                .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
+                    .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
         )
     }
 
@@ -587,6 +598,7 @@ class AntigravityRuntimeBridge(
             context.startService(
                 android.content.Intent(context, RuntimeExecutionService::class.java)
                     .setAction(RuntimeExecutionService.ACTION_PROGRESS)
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
                     .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, activeProjectSlug)
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, "$detail · $minutes:${seconds.toString().padStart(2, '0')}"),
             )
@@ -600,6 +612,7 @@ class AntigravityRuntimeBridge(
             context.startService(
                 android.content.Intent(context, RuntimeExecutionService::class.java)
                     .setAction(if (completed) RuntimeExecutionService.ACTION_COMPLETE else RuntimeExecutionService.ACTION_FAILED)
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
                     .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName)
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, detail),
             )
@@ -612,7 +625,8 @@ class AntigravityRuntimeBridge(
         runCatching {
             context.startService(
                 android.content.Intent(context, RuntimeExecutionService::class.java)
-                    .setAction(RuntimeExecutionService.ACTION_CANCELLED),
+                    .setAction(RuntimeExecutionService.ACTION_CANCELLED)
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId),
             )
         }.onFailure { context.stopService(android.content.Intent(context, RuntimeExecutionService::class.java)) }
     }

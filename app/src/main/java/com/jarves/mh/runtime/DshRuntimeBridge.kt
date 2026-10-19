@@ -61,6 +61,20 @@ class DshRuntimeBridge(
 
     override suspend fun startSession(projectId: String, projectSlug: String, projectKind: ProjectKind, prompt: String, conversationHistory: List<ChatMessage>, provider: ProviderProfile): String = withContext(Dispatchers.IO + NonCancellable) {
         val sessionId = UUID.randomUUID().toString()
+        if (!RuntimeTaskController.register(sessionId, projectId, "deepseek-harness") {
+                    userStopRequested = true
+                    val running = activeProcess
+                    if (running != null) {
+                        Thread {
+                            running.destroy()
+                            Thread.sleep(500)
+                            if (running.isAlive) running.destroyForcibly()
+                        }.start()
+                    }
+        }) {
+            eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "Another task is running for this project or agent"))
+            return@withContext sessionId
+        }
         finishedSessions.remove(sessionId)
         activeSessionId = sessionId
         userStopRequested = false
@@ -74,6 +88,7 @@ class DshRuntimeBridge(
         val secret = secretFor(provider).orEmpty().ifBlank { localServerPlaceholderKey(provider) }
         if (secret.isBlank()) {
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "No API key is saved for ${provider.kind.title}."))
+            RuntimeTaskController.finish(sessionId, SessionLifecycle.FAILED)
             return@withContext sessionId
         }
         if (provider.kind == ProviderKind.CLAUDE) {
@@ -83,22 +98,13 @@ class DshRuntimeBridge(
                     "Claude subscription login is not supported by DeepSeek Harness. Pick a key-based provider in Settings.",
                 ),
             )
+            RuntimeTaskController.finish(sessionId, SessionLifecycle.FAILED)
             return@withContext sessionId
         }
 
+        var sessionSucceeded = false
         var openRouterGateway: OpenRouterRoutingGateway? = null
         runCatching {
-            RuntimeTaskController.stopAction = {
-                userStopRequested = true
-                val running = activeProcess
-                if (running != null) {
-                    Thread {
-                        running.destroy()
-                        Thread.sleep(500)
-                        if (running.isAlive) running.destroyForcibly()
-                    }.start()
-                }
-            }
             startForegroundRuntime(projectSlug)
             val installed = installer.installedRuntime()
             check(installer.isAgentInstalled(com.jarves.mh.model.AgentKind.DEEPSEEK_HARNESS)) {
@@ -168,6 +174,7 @@ class DshRuntimeBridge(
             // the SDK wrapper alive after acknowledging shutdown, so cleanup may end
             // it with SIGKILL and produce 137 even though the turn completed normally.
             if (sdkResult.completed && sdkResult.failure.isBlank() && !userStopRequested) {
+                sessionSucceeded = true
                 emitCompletedOnce(sessionId)
                 finishForegroundRuntime(
                     completed = true,
@@ -195,7 +202,11 @@ class DshRuntimeBridge(
         openRouterGateway?.close()
         activeProcess = null
         activeSessionId = null
-        RuntimeTaskController.stopAction = null
+        RuntimeTaskController.finish(sessionId, when {
+            userStopRequested -> SessionLifecycle.CANCELLED
+            sessionSucceeded -> SessionLifecycle.COMPLETED
+            else -> SessionLifecycle.FAILED
+        })
         sessionId
     }
 
@@ -644,6 +655,7 @@ class DshRuntimeBridge(
             context.startService(
                 android.content.Intent(context, RuntimeExecutionService::class.java)
                     .setAction(RuntimeExecutionService.ACTION_PROGRESS)
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
                     .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, activeProjectSlug)
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, text),
             )
@@ -663,7 +675,8 @@ class DshRuntimeBridge(
             context,
             android.content.Intent(context, RuntimeExecutionService::class.java)
                 .setAction(RuntimeExecutionService.ACTION_START)
-                .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
+                .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
+                    .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName),
         )
     }
 
@@ -677,6 +690,7 @@ class DshRuntimeBridge(
                         if (completed) RuntimeExecutionService.ACTION_COMPLETE
                         else RuntimeExecutionService.ACTION_FAILED,
                     )
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId)
                     .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, projectName)
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, detail),
             )
@@ -692,7 +706,8 @@ class DshRuntimeBridge(
         runCatching {
             context.startService(
                 android.content.Intent(context, RuntimeExecutionService::class.java)
-                    .setAction(RuntimeExecutionService.ACTION_CANCELLED),
+                    .setAction(RuntimeExecutionService.ACTION_CANCELLED)
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, activeSessionId),
             )
         }.onFailure {
             context.stopService(android.content.Intent(context, RuntimeExecutionService::class.java))
