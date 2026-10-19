@@ -23,6 +23,7 @@
         android:theme="@style/Theme.PocketDev"
         android:usesCleartextTraffic="false">
         <activity android:name=".extensions.ExtensionManagerActivity" android:exported="false" />
+        <activity android:name=".runtime.SessionHistoryActivity" android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
