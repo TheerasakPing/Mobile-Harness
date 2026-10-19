@@ -133,10 +133,11 @@ class ClaudeRuntimeBridge(
                 "No API key is saved for ${provider.kind.title}."
             }
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, message))
-            RuntimeTaskController.release(sessionId)
+            RuntimeTaskController.finish(sessionId, SessionLifecycle.FAILED)
             return@withContext sessionId
         }
 
+        var sessionSucceeded = false
         var formatGateway: LocalFormatGateway? = null
         var openRouterGateway: OpenRouterRoutingGateway? = null
         runCatching {
@@ -257,6 +258,7 @@ class ClaudeRuntimeBridge(
                     acceptLastChanges(projectId)
                 }
                 if (exit == 0) {
+                    sessionSucceeded = true
                     emitCompletedOnce(sessionId)
                     finishForegroundRuntime(
                         completed = true,
@@ -286,7 +288,11 @@ class ClaudeRuntimeBridge(
         openRouterGateway?.close()
         activeProcess = null
         activeSessionId = null
-        RuntimeTaskController.release(sessionId)
+        RuntimeTaskController.finish(sessionId, when {
+            userStopRequested -> SessionLifecycle.CANCELLED
+            sessionSucceeded -> SessionLifecycle.COMPLETED
+            else -> SessionLifecycle.FAILED
+        })
         sessionId
     }
 
