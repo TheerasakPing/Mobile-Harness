@@ -13,11 +13,14 @@ import com.jarves.mh.R
 import com.jarves.mh.ui.AppStrings
 
 internal object RuntimeTaskController {
-    @Volatile var stopAction: (() -> Unit)? = null
+    private val registry = TaskCancellationRegistry()
 
-    fun requestStop() {
-        stopAction?.invoke()
-    }
+    fun register(taskId: String, projectId: String, runtimeId: String, stopAction: () -> Unit): Boolean =
+        registry.register(taskId, projectId, runtimeId, stopAction)
+
+    fun requestStop(taskId: String): Boolean = registry.requestStop(taskId)
+
+    fun release(taskId: String): Boolean = registry.release(taskId)
 }
 
 class RuntimeExecutionService : Service() {
@@ -31,6 +34,7 @@ class RuntimeExecutionService : Service() {
         get() = notificationTitleOverride ?: AppStrings.get(this, R.string.rt_exec_default_title)
     private var canStop: Boolean = true
     private var taskRunning: Boolean = false
+    private var activeTaskId: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -38,12 +42,18 @@ class RuntimeExecutionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val requestTaskId = intent?.getStringExtra(EXTRA_TASK_ID)
+        val action = intent?.action ?: ACTION_START
+        // Ignore completion, progress and Stop intents from an older notification/job.
+        if (action != ACTION_START && requestTaskId != activeTaskId) return START_NOT_STICKY
         intent?.getStringExtra(EXTRA_PROJECT_NAME)?.takeIf(String::isNotBlank)?.let { projectNameOverride = it }
         intent?.getStringExtra(EXTRA_TITLE)?.takeIf(String::isNotBlank)?.let { notificationTitleOverride = it }
         if (intent?.hasExtra(EXTRA_CAN_STOP) == true) canStop = intent.getBooleanExtra(EXTRA_CAN_STOP, true)
         when (intent?.action ?: ACTION_START) {
             ACTION_STOP -> {
-                RuntimeTaskController.requestStop()
+                if (requestTaskId.isNullOrBlank() || !RuntimeTaskController.requestStop(requestTaskId)) {
+                    return START_NOT_STICKY
+                }
                 getSystemService(NotificationManager::class.java).notify(
                     RUNNING_NOTIFICATION_ID,
                     runningNotification(AppStrings.get(this, R.string.rt_exec_stopping), includeStop = false),
@@ -56,7 +66,7 @@ class RuntimeExecutionService : Service() {
                     ?: AppStrings.get(this, R.string.rt_exec_working_in, projectName)
                 getSystemService(NotificationManager::class.java).notify(
                     RUNNING_NOTIFICATION_ID,
-                    runningNotification(detail, includeStop = canStop),
+                    runningNotification(detail, includeStop = canStop && activeTaskId != null),
                 )
             }
             ACTION_COMPLETE -> finishTask(
@@ -71,11 +81,13 @@ class RuntimeExecutionService : Service() {
             )
             ACTION_CANCELLED -> {
                 taskRunning = false
+                activeTaskId = null
                 releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
             else -> {
+                activeTaskId = requestTaskId
                 taskRunning = true
                 val detail = intent?.getStringExtra(EXTRA_DETAIL)?.takeIf(String::isNotBlank)
                     ?: AppStrings.get(this, R.string.rt_exec_working_in, projectName)
@@ -104,7 +116,10 @@ class RuntimeExecutionService : Service() {
             val stopIntent = PendingIntent.getService(
                 this,
                 2,
-                Intent(this, RuntimeExecutionService::class.java).setAction(ACTION_STOP),
+                Intent(this, RuntimeExecutionService::class.java)
+                    .setAction(ACTION_STOP)
+                    .setData(android.net.Uri.parse("mobile-harness://task/${activeTaskId}"))
+                    .putExtra(EXTRA_TASK_ID, activeTaskId),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
             builder.addAction(0, AppStrings.get(this, R.string.rt_exec_stop_task), stopIntent)
@@ -114,6 +129,7 @@ class RuntimeExecutionService : Service() {
 
     private fun finishTask(title: String, detail: String, failed: Boolean) {
         taskRunning = false
+        activeTaskId = null
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         val notification = NotificationCompat.Builder(this, RESULT_CHANNEL_ID)
@@ -166,6 +182,7 @@ class RuntimeExecutionService : Service() {
         const val ACTION_FAILED = "com.jarves.mh.FAIL_RUNTIME"
         const val ACTION_CANCELLED = "com.jarves.mh.CANCEL_RUNTIME"
         const val EXTRA_PROJECT_NAME = "project_name"
+        const val EXTRA_TASK_ID = "task_id"
         const val EXTRA_DETAIL = "detail"
         const val EXTRA_TITLE = "title"
         const val EXTRA_CAN_STOP = "can_stop"
