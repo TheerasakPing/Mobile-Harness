@@ -428,6 +428,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         },
     )
     private val agentRegistry = AgentRegistry.builtIns(claudeRuntime, dshRuntime, antigravityRuntime)
+    private var multiAgentQueue: com.jarves.mh.runtime.MultiAgentPlanQueue? = null
     private fun activeRuntime(): com.jarves.mh.runtime.RuntimeBridge = agentRegistry.require(_state.value.agentKind).runtime
     private val providerApi = ProviderApiClient(application)
     private fun appUpdater(): AppUpdater = AppUpdater(
@@ -4669,6 +4670,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return clean.ifBlank { "attachment-${UUID.randomUUID().toString().take(8)}" }
     }
 
+    /** User-approved, sequential agent chain. Every step uses the existing session and provider pipeline. */
+    fun startMultiAgentPlan(steps: List<com.jarves.mh.runtime.MultiAgentStep>) {
+        val current = _state.value
+        if (current.activeProject == null || current.isRunning || current.androidBuildRunning ||
+            current.projectTerminalRunning || pendingFollowUps.isNotEmpty() || multiAgentQueue != null) {
+            _state.update { it.copy(toastMessage = "Finish the active task and select a project before starting a plan") }
+            return
+        }
+        if (steps.any { it.agent !in current.installedAgentVersions }) {
+            _state.update { it.copy(toastMessage = "Install every selected coding agent first") }
+            return
+        }
+        val queue = runCatching { com.jarves.mh.runtime.MultiAgentPlanQueue(steps) }
+            .getOrElse { error ->
+                _state.update { it.copy(toastMessage = error.message) }
+                return
+            }
+        multiAgentQueue = queue
+        queue.begin()?.let(::startMultiAgentStep)
+    }
+
+    private fun startMultiAgentStep(step: com.jarves.mh.runtime.MultiAgentStep) {
+        if (_state.value.activeProject == null || _state.value.isRunning) {
+            multiAgentQueue?.cancel()
+            multiAgentQueue = null
+            return
+        }
+        selectAgent(step.agent)
+        sendPrompt(step.prompt)
+        if (!_state.value.isRunning) {
+            multiAgentQueue?.cancel()
+            multiAgentQueue = null
+            _state.update { it.copy(toastMessage = "Could not start next agent; review its credentials") }
+        }
+    }
+
     fun sendPrompt(prompt: String) {
         val project = state.value.activeProject ?: return
         if (_state.value.agentKind == AgentKind.ANTIGRAVITY &&
@@ -4796,6 +4833,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopTask() {
+        multiAgentQueue?.cancel()
+        multiAgentQueue = null
         if (!_state.value.isRunning) return
         steeringToFollowUp = false
         pendingFollowUps.clear()
@@ -5195,7 +5234,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             activeRuntimeRequest = null
             failedApiKeyIds.clear()
             steeringToFollowUp = false
-            if (pendingFollowUps.isNotEmpty()) {
+            val queue = multiAgentQueue
+            if (queue != null) {
+                val next = queue.onTerminal(event is RuntimeEvent.SessionCompleted)
+                if (next == null) {
+                    multiAgentQueue = null
+                } else {
+                    viewModelScope.launch {
+                        delay(200)
+                        if (!_state.value.isRunning && multiAgentQueue === queue) startMultiAgentStep(next)
+                    }
+                }
+            } else if (pendingFollowUps.isNotEmpty()) {
                 viewModelScope.launch {
                     delay(150)
                     if (!_state.value.isRunning) startNextFollowUp()
