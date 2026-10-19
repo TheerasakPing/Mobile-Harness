@@ -52,6 +52,7 @@ private fun ExtensionManagerScreen(
     var message by remember { mutableStateOf<String?>(null) }
     var pending by remember { mutableStateOf<ExtensionSummary?>(null) }
     var chosen by remember { mutableStateOf(setOf<ExtensionCapability>()) }
+    var importKind by remember { mutableStateOf(ExtensionKind.SKILL) }
     fun refresh() { inventory = catalog.list(projectId ?: "global") }
     val importSkill = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
@@ -60,8 +61,12 @@ private fun ExtensionManagerScreen(
                     null, null, null)?.use { cursor ->
                     if (cursor.moveToFirst()) cursor.getString(0) else null
                 }.orEmpty()
-                require(name.endsWith(".md", true) || name.endsWith(".txt", true)) {
-                    "Choose a Markdown or plain-text skill"
+                if (importKind == ExtensionKind.SKILL) {
+                    require(name.endsWith(".md", true) || name.endsWith(".txt", true)) {
+                        "Choose a Markdown or plain-text skill"
+                    }
+                } else {
+                    require(name.endsWith(".json", true)) { "Choose an MCP JSON manifest" }
                 }
                 val data = ByteArrayOutputStream()
                 val buffer = ByteArray(8192)
@@ -75,14 +80,19 @@ private fun ExtensionManagerScreen(
                 } ?: error("Could not read selected document")
                 val bytes = data.toByteArray()
                 require(bytes.isNotEmpty()) { "Empty skill" }
-                val id = "local_" + UUID.randomUUID().toString().replace("-", "")
-                val sha = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
-                    "%02x".format(it)
+                val manifest = if (importKind == ExtensionKind.MCP_SERVER) {
+                    McpManifestParser.parse(bytes)
+                } else {
+                    val id = "local_" + UUID.randomUUID().toString().replace("-", "")
+                    val sha = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
+                        "%02x".format(it)
+                    }
+                    ExtensionManifest(id, "1", ExtensionKind.SKILL,
+                        "local://document/$id", sha, emptySet())
                 }
-                catalog.install(ExtensionManifest(id, "1", ExtensionKind.SKILL,
-                    "local://document/$id", sha, emptySet()), bytes)
+                catalog.install(manifest, bytes)
                 refresh()
-                message = "Imported as a read-only document. No code was executed."
+                message = "Imported ${manifest.id} as verified metadata. No code was executed."
             }.onFailure { message = it.message ?: "Import failed" }
         }
     }
@@ -106,7 +116,16 @@ private fun ExtensionManagerScreen(
                 Text("Project: $projectId", style = MaterialTheme.typography.labelSmall)
             }
             Spacer(Modifier.height(12.dp))
-            Button(onClick = { importSkill.launch("*/*") }) { Text("Import local Skill (.md/.txt)") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    importKind = ExtensionKind.SKILL
+                    importSkill.launch("*/*")
+                }) { Text("Import Skill") }
+                OutlinedButton(onClick = {
+                    importKind = ExtensionKind.MCP_SERVER
+                    importSkill.launch("*/*")
+                }) { Text("Import MCP JSON") }
+            }
             message?.let { Text(it, color = MaterialTheme.colorScheme.secondary) }
             Spacer(Modifier.height(10.dp))
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
