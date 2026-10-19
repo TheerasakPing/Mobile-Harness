@@ -51,6 +51,8 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -183,6 +185,7 @@ fun AgentScreen(
     onActivateApiKey: (ProviderKind, String) -> List<ApiKeyInfo>,
     onRemoveApiKey: (ProviderKind, String) -> List<ApiKeyInfo>,
     onSelectAgent: (AgentKind) -> Unit = {},
+    onRunMultiAgentPlan: (List<com.jarves.mh.runtime.MultiAgentStep>) -> Unit = {},
     onInstallAgent: (AgentKind) -> Unit = {},
     onCheckAgentUpdates: () -> Unit = {},
     onUpdateAgent: (AgentKind) -> Unit = {},
@@ -234,6 +237,10 @@ fun AgentScreen(
     var antigravitySearch by rememberSaveable { mutableStateOf("") }
     var antigravityCode by rememberSaveable { mutableStateOf("") }
     var viewedAgent by rememberSaveable { mutableStateOf(state.agentKind) }
+    var planPrompt by rememberSaveable { mutableStateOf("") }
+    var implementPrompt by rememberSaveable { mutableStateOf("") }
+    var reviewPrompt by rememberSaveable { mutableStateOf("") }
+    var confirmAgentPlan by remember { mutableStateOf(false) }
 
     val orderedAgents = remember(state.primaryAgentKind) {
         listOf(state.primaryAgentKind) + AgentKind.entries.filterNot { it == state.primaryAgentKind }
@@ -757,6 +764,36 @@ fun AgentScreen(
         }
     }
 
+    if (confirmAgentPlan) {
+        val selectedSteps = listOfNotNull(
+            planPrompt.takeIf(String::isNotBlank)?.let {
+                com.jarves.mh.runtime.MultiAgentStep(AgentKind.CLAUDE_CODE, it)
+            },
+            implementPrompt.takeIf(String::isNotBlank)?.let {
+                com.jarves.mh.runtime.MultiAgentStep(AgentKind.DEEPSEEK_HARNESS, it)
+            },
+            reviewPrompt.takeIf(String::isNotBlank)?.let {
+                com.jarves.mh.runtime.MultiAgentStep(AgentKind.ANTIGRAVITY, it)
+            },
+        )
+        AlertDialog(
+            onDismissRequest = { confirmAgentPlan = false },
+            title = { Text("Start ${selectedSteps.size}-step agent plan?") },
+            text = {
+                Text("Agents may modify project files. Review each task first. Antigravity may run with permission bypass according to the existing agent settings. The plan stops on failure and never auto-replays after process death.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmAgentPlan = false
+                    onRunMultiAgentPlan(selectedSteps)
+                }) { Text("Start sequential plan") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmAgentPlan = false }) { Text("Cancel") }
+            },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -980,6 +1017,48 @@ fun AgentScreen(
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // Multi-agent orchestration stays sequential; no unreviewed parallel workspace writes.
+            item {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Multi-Agent Plan", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("Sequential handoff: Claude → DeepSeek → Antigravity. Failed steps stop the plan.",
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedTextField(
+                            value = planPrompt,
+                            onValueChange = { planPrompt = it.take(12_000) },
+                            label = { Text("Claude · plan (optional)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 2,
+                        )
+                        OutlinedTextField(
+                            value = implementPrompt,
+                            onValueChange = { implementPrompt = it.take(12_000) },
+                            label = { Text("DeepSeek · implement (optional)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 2,
+                        )
+                        OutlinedTextField(
+                            value = reviewPrompt,
+                            onValueChange = { reviewPrompt = it.take(12_000) },
+                            label = { Text("Antigravity · review (optional)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 2,
+                        )
+                        Button(
+                            enabled = state.activeProject != null && !state.isRunning &&
+                                !state.androidBuildRunning &&
+                                listOf(planPrompt, implementPrompt, reviewPrompt).count { it.isNotBlank() } >= 2,
+                            onClick = { confirmAgentPlan = true },
+                        ) { Text("Review and start plan") }
                     }
                 }
             }
