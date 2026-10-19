@@ -2,16 +2,19 @@ package com.jarves.mh.runtime
 
 /** Process-local dispatch guard. Each Stop command must target an explicit task ID. */
 class TaskCancellationRegistry {
-    private data class Task(val projectId: String, val cancel: () -> Unit, var stopping: Boolean = false)
+    private data class Task(val projectId: String, val runtimeId: String, val cancel: () -> Unit, var stopping: Boolean = false)
     private val tasks = mutableMapOf<String, Task>()
     private val projectOwners = mutableMapOf<String, String>()
+    private val runtimeOwners = mutableMapOf<String, String>()
     private val lock = Any()
 
-    fun register(taskId: String, projectId: String, cancel: () -> Unit): Boolean = synchronized(lock) {
+    fun register(taskId: String, projectId: String, runtimeId: String = "", cancel: () -> Unit): Boolean = synchronized(lock) {
         require(taskId.isNotBlank() && projectId.isNotBlank())
-        if (tasks.containsKey(taskId) || projectOwners.containsKey(projectId)) return@synchronized false
-        tasks[taskId] = Task(projectId, cancel)
+        if (tasks.containsKey(taskId) || projectOwners.containsKey(projectId) ||
+            (runtimeId.isNotEmpty() && runtimeOwners.containsKey(runtimeId))) return@synchronized false
+        tasks[taskId] = Task(projectId, runtimeId, cancel)
         projectOwners[projectId] = taskId
+        if (runtimeId.isNotEmpty()) runtimeOwners[runtimeId] = taskId
         true
     }
 
@@ -31,6 +34,7 @@ class TaskCancellationRegistry {
     fun release(taskId: String): Boolean = synchronized(lock) {
         val task = tasks.remove(taskId) ?: return@synchronized false
         if (projectOwners[task.projectId] == taskId) projectOwners.remove(task.projectId)
+        if (task.runtimeId.isNotEmpty() && runtimeOwners[task.runtimeId] == taskId) runtimeOwners.remove(task.runtimeId)
         true
     }
 
