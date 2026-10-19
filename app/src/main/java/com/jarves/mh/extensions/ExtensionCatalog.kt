@@ -19,6 +19,11 @@ data class ExtensionManifest(
     val capabilities: Set<ExtensionCapability>,
 )
 
+data class ExtensionSummary(
+    val manifest: ExtensionManifest,
+    val granted: Set<ExtensionCapability>,
+)
+
 /** Metadata-only inventory. Nothing here executes an MCP process or skill instruction. */
 class ExtensionCatalog(private val directory: File) {
     private val lock = Any()
@@ -28,7 +33,8 @@ class ExtensionCatalog(private val directory: File) {
     fun install(manifest: ExtensionManifest, payload: ByteArray): Unit = synchronized(lock) {
         validId(manifest.id)
         require(manifest.version.isNotBlank() && manifest.version.length <= 64) { "Invalid version" }
-        require(manifest.source.startsWith("https://") && manifest.source.length <= 2048) { "Only HTTPS sources are supported" }
+        require((manifest.source.startsWith("https://") || manifest.source.startsWith("local://")) &&
+            manifest.source.length <= 2048) { "Only HTTPS and local document sources are supported" }
         require(manifest.sha256.matches(Regex("[0-9a-f]{64}"))) { "Invalid SHA-256" }
         require(sha256(payload) == manifest.sha256) { "Payload checksum mismatch" }
         require(payload.isNotEmpty()) { "Empty extension payload" }
@@ -73,6 +79,36 @@ class ExtensionCatalog(private val directory: File) {
         val granted = data.getProperty("grant.$projectId") ?: return@synchronized false
         parseCapabilities(granted).contains(capability) &&
             parseCapabilities(data.getProperty("capabilities")).contains(capability)
+    }
+
+    /** Only healthy, hash-verified catalog entries appear. Never exposes payload bytes or secrets. */
+    fun list(projectId: String): List<ExtensionSummary> = synchronized(lock) {
+        validId(projectId)
+        directory.listFiles().orEmpty()
+            .asSequence()
+            .filter { it.isFile && it.extension == "properties" && !Files.isSymbolicLink(it.toPath()) }
+            .map { it.nameWithoutExtension }
+            .filter(::safeId)
+            .mapNotNull { id ->
+                val data = verified(id) ?: return@mapNotNull null
+                runCatching {
+                    val caps = parseCapabilities(data.getProperty("capabilities"))
+                    val grant = parseCapabilities(data.getProperty("grant.$projectId"))
+                    ExtensionSummary(
+                        manifest = ExtensionManifest(
+                            id = id,
+                            version = requireNotNull(data.getProperty("version")),
+                            kind = ExtensionKind.valueOf(requireNotNull(data.getProperty("kind"))),
+                            source = requireNotNull(data.getProperty("source")),
+                            sha256 = requireNotNull(data.getProperty("sha256")),
+                            capabilities = caps,
+                        ),
+                        granted = grant.intersect(caps),
+                    )
+                }.getOrNull()
+            }
+            .sortedBy { it.manifest.id }
+            .toList()
     }
 
     private fun verified(id: String): Properties? = runCatching {
