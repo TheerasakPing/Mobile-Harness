@@ -109,7 +109,7 @@ import com.jarves.mh.ui.theme.AppThemeMode
 import com.jarves.mh.ui.theme.PocketOrange
 import kotlinx.coroutines.launch
 
-private enum class SettingsSection { APPEARANCE, LANGUAGE, TOOLS, RUNTIME, DIAGNOSTICS, UPDATE_CHANNEL }
+private enum class SettingsSection { APPEARANCE, LANGUAGE, TOOLS, EXTENSIONS, RUNTIME, DIAGNOSTICS, UPDATE_CHANNEL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -256,6 +256,27 @@ fun SettingsScreen(
                         onStopInactiveProcesses = onStopInactiveProcesses,
                         onClearRuntimeCache = onClearRuntimeCache,
                     )
+                }
+            }
+
+            item {
+                SettingsAccordion(
+                    title = "MCP & Skills Manager",
+                    subtitle = "Verified local skills · per-project capability grants",
+                    icon = Icons.Default.Code,
+                    expanded = expanded == SettingsSection.EXTENSIONS,
+                    onClick = { toggle(SettingsSection.EXTENSIONS) },
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Import Markdown skills and review installed MCP manifests. Remote server execution stays disabled until explicitly approved.")
+                        Button(onClick = {
+                            context.startActivity(
+                                com.jarves.mh.extensions.ExtensionManagerActivity.open(
+                                    context, state.activeProject?.id,
+                                )
+                            )
+                        }) { Text("Open MCP & Skills Manager") }
+                    }
                 }
             }
 
