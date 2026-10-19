@@ -186,6 +186,7 @@ fun AgentScreen(
     onRemoveApiKey: (ProviderKind, String) -> List<ApiKeyInfo>,
     onSelectAgent: (AgentKind) -> Unit = {},
     onRunMultiAgentPlan: (List<com.jarves.mh.runtime.MultiAgentStep>) -> Unit = {},
+    onPrepareRemoteProbe: (String) -> Unit = {},
     onInstallAgent: (AgentKind) -> Unit = {},
     onCheckAgentUpdates: () -> Unit = {},
     onUpdateAgent: (AgentKind) -> Unit = {},
@@ -241,6 +242,12 @@ fun AgentScreen(
     var implementPrompt by rememberSaveable { mutableStateOf("") }
     var reviewPrompt by rememberSaveable { mutableStateOf("") }
     var confirmAgentPlan by remember { mutableStateOf(false) }
+    var showRemoteWorkspace by remember { mutableStateOf(false) }
+    var sshHost by rememberSaveable { mutableStateOf("") }
+    var sshUsername by rememberSaveable { mutableStateOf("") }
+    var sshPort by rememberSaveable { mutableStateOf("22") }
+    var sshKnownHosts by rememberSaveable { mutableStateOf("") }
+    var sshError by remember { mutableStateOf<String?>(null) }
 
     val orderedAgents = remember(state.primaryAgentKind) {
         listOf(state.primaryAgentKind) + AgentKind.entries.filterNot { it == state.primaryAgentKind }
@@ -794,6 +801,45 @@ fun AgentScreen(
         )
     }
 
+    if (showRemoteWorkspace) {
+        AlertDialog(
+            onDismissRequest = { showRemoteWorkspace = false },
+            title = { Text("Verified SSH remote") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Import the remote server's verified host key into a known_hosts file inside the project workspace first. Never disable StrictHostKeyChecking.")
+                    OutlinedTextField(value = sshHost, onValueChange = { sshHost = it },
+                        label = { Text("Host or IP") }, singleLine = true)
+                    OutlinedTextField(value = sshUsername, onValueChange = { sshUsername = it },
+                        label = { Text("SSH user") }, singleLine = true)
+                    OutlinedTextField(value = sshPort, onValueChange = { sshPort = it },
+                        label = { Text("Port") }, singleLine = true)
+                    OutlinedTextField(value = sshKnownHosts,
+                        onValueChange = { sshKnownHosts = it },
+                        label = { Text("Guest known_hosts path") }, singleLine = true,
+                        placeholder = { Text("/workspace/project/.ssh/known_hosts") })
+                    sshError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching {
+                        val command = com.jarves.mh.remote.RemoteSshCommand.connectionProbe(
+                            com.jarves.mh.remote.RemoteWorkspaceProfile(
+                                sshHost.trim(), sshUsername.trim(), sshPort.toInt(),
+                                sshKnownHosts.trim(),
+                            )
+                        )
+                        onPrepareRemoteProbe(command)
+                        showRemoteWorkspace = false
+                        sshError = null
+                    }.onFailure { sshError = it.message ?: "Invalid SSH profile" }
+                }) { Text("Prepare terminal probe") }
+            },
+            dismissButton = { TextButton(onClick = { showRemoteWorkspace = false }) { Text("Cancel") } },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -1059,6 +1105,24 @@ fun AgentScreen(
                                 listOf(planPrompt, implementPrompt, reviewPrompt).count { it.isNotBlank() } >= 2,
                             onClick = { confirmAgentPlan = true },
                         ) { Text("Review and start plan") }
+                    }
+                }
+            }
+
+            item {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Remote Workspace", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("Prepare a strict-host-key SSH connection probe in the project terminal. No passwords saved.",
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        OutlinedButton(
+                            onClick = { showRemoteWorkspace = true },
+                            enabled = state.activeProject != null && !state.projectTerminalRunning,
+                        ) { Text("Configure SSH") }
                     }
                 }
             }
