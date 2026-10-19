@@ -1379,6 +1379,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(toastMessage = str(R.string.vm_wait_terminal_before_build)) }
             return
         }
+        val buildTaskId = UUID.randomUUID().toString()
+        if (!RuntimeTaskController.register(buildTaskId, project.id, "android-build", ::cancelAndroidBuild)) {
+            _state.update { it.copy(toastMessage = "Another task is already running for this project") }
+            return
+        }
         val startedAt = System.currentTimeMillis()
         androidBuildStopRequested = false
         _state.update {
@@ -1398,7 +1403,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         saveAndroidBuildRecord(project.id)
-        startAndroidBuildForegroundService(project, task)
+        startAndroidBuildForegroundService(project, task, buildTaskId)
         viewModelScope.launch(Dispatchers.IO) {
             var buildWorkspace: File? = null
             var finalOutput = ""
@@ -1423,7 +1428,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     projectGuestRoot(project),
                 )
                 androidBuildProcess = process
-                RuntimeTaskController.stopAction = ::cancelAndroidBuild
                 val native = process as? NativeSpawnProcess ?: error(str(R.string.an_unsupported_build_process))
                 var offset = 0L
                 while (process.isAlive || native.outputFile.length() > offset) {
@@ -1510,11 +1514,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     saveAndroidBuildRecord(project.id)
                 }
-                finishAndroidBuildForegroundService(project, message, failed = !cancelled, cancelled = cancelled)
+                finishAndroidBuildForegroundService(project, message, failed = !cancelled, cancelled = cancelled, taskId = buildTaskId)
             }.also {
                 androidBuildProcess = null
                 androidBuildStopRequested = false
-                RuntimeTaskController.stopAction = null
+                RuntimeTaskController.release(buildTaskId)
                 steeringToFollowUp = false
                 if (pendingFollowUps.isNotEmpty()) {
                     viewModelScope.launch {
@@ -1547,11 +1551,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         AndroidBuildStage.IDLE -> str(R.string.android_stage_idle)
     }
 
-    private fun startAndroidBuildForegroundService(project: Project, task: String) {
+    private fun startAndroidBuildForegroundService(project: Project, task: String, taskId: String) {
         ContextCompat.startForegroundService(
             getApplication(),
             Intent(getApplication(), RuntimeExecutionService::class.java)
                 .setAction(RuntimeExecutionService.ACTION_START)
+                .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, taskId)
                 .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, project.name)
                 .putExtra(RuntimeExecutionService.EXTRA_TITLE, if (task == "clean") str(R.string.an_notif_cleaning_title) else str(R.string.an_notif_building_title))
                 .putExtra(RuntimeExecutionService.EXTRA_DETAIL, if (task == "clean") str(R.string.an_notif_cleaning_detail) else str(R.string.an_notif_building_detail))
@@ -1564,6 +1569,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         detail: String,
         failed: Boolean,
         cancelled: Boolean = false,
+        taskId: String,
     ) {
         runCatching {
             getApplication<Application>().startService(
@@ -1575,6 +1581,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             else -> RuntimeExecutionService.ACTION_COMPLETE
                         },
                     )
+                    .putExtra(RuntimeExecutionService.EXTRA_TASK_ID, taskId)
                     .putExtra(RuntimeExecutionService.EXTRA_PROJECT_NAME, project.name)
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, detail),
             )
