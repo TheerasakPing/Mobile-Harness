@@ -93,7 +93,7 @@ class RuntimeExecutionService : Service() {
                     ?: AppStrings.get(this, R.string.rt_exec_working_in, projectName)
                 startForeground(
                     RUNNING_NOTIFICATION_ID,
-                    runningNotification(detail, includeStop = canStop),
+                    runningNotification(detail, includeStop = canStop && activeTaskId != null),
                 )
                 acquireWakeLock()
             }
