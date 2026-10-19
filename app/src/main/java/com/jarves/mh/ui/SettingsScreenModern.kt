@@ -256,6 +256,10 @@ fun SettingsScreen(
                         onStopInactiveProcesses = onStopInactiveProcesses,
                         onClearRuntimeCache = onClearRuntimeCache,
                     )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = {
+                        context.startActivity(Intent(context, com.jarves.mh.runtime.SessionHistoryActivity::class.java))
+                    }) { Text("View Agent Session Recovery") }
                 }
             }
 
