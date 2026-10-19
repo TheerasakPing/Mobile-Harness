@@ -13,14 +13,27 @@ import com.jarves.mh.R
 import com.jarves.mh.ui.AppStrings
 
 internal object RuntimeTaskController {
-    private val registry = TaskCancellationRegistry()
+    @Volatile private var lifecycle: RuntimeTaskLifecycle? = null
+
+    fun initialize(context: android.content.Context) {
+        synchronized(this) {
+            if (lifecycle != null) return
+            val started = RuntimeTaskLifecycle(java.io.File(context.filesDir, "session-journal"))
+            started.reconcileOnColdStart()
+            lifecycle = started
+        }
+    }
+
+    private fun running(): RuntimeTaskLifecycle = checkNotNull(lifecycle) {
+        "Session journal is not initialized; refusing to start untracked work"
+    }
 
     fun register(taskId: String, projectId: String, runtimeId: String, stopAction: () -> Unit): Boolean =
-        registry.register(taskId, projectId, runtimeId, stopAction)
+        running().register(taskId, projectId, runtimeId, stopAction)
 
-    fun requestStop(taskId: String): Boolean = registry.requestStop(taskId)
+    fun requestStop(taskId: String): Boolean = lifecycle?.requestStop(taskId) ?: false
 
-    fun release(taskId: String): Boolean = registry.release(taskId)
+    fun finish(taskId: String, outcome: SessionLifecycle) = running().finish(taskId, outcome)
 }
 
 class RuntimeExecutionService : Service() {
