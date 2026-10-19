@@ -1492,7 +1492,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     saveAndroidBuildRecord(project.id)
                     refreshAndroidApkInfo()
                 }
-                finishAndroidBuildForegroundService(project, message, failed = false)
+                finishAndroidBuildForegroundService(project, message, failed = false, taskId = buildTaskId)
                 if (shouldInstallAndRun) beginAndroidInstall(apk!!, launch = true, action = action)
             }.onFailure { error ->
                 val cancelled = error is java.util.concurrent.CancellationException || androidBuildStopRequested
