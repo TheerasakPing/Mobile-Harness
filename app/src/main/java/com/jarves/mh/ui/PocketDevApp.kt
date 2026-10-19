@@ -2527,6 +2527,7 @@ private fun RootScreenHost(
                     onRemoveApiKey = viewModel::removeApiKey,
                     onSelectAgent = viewModel::selectAgent,
                     onRunMultiAgentPlan = viewModel::startMultiAgentPlan,
+                    onPrepareRemoteProbe = viewModel::prepareProjectTerminalCommand,
                     onInstallAgent = viewModel::installAgent,
                     onCheckAgentUpdates = viewModel::checkAgentUpdates,
                     onUpdateAgent = viewModel::updateAgent,
