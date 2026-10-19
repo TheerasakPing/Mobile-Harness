@@ -88,7 +88,7 @@ class DshRuntimeBridge(
         val secret = secretFor(provider).orEmpty().ifBlank { localServerPlaceholderKey(provider) }
         if (secret.isBlank()) {
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "No API key is saved for ${provider.kind.title}."))
-            RuntimeTaskController.release(sessionId)
+            RuntimeTaskController.finish(sessionId, SessionLifecycle.FAILED)
             return@withContext sessionId
         }
         if (provider.kind == ProviderKind.CLAUDE) {
@@ -98,10 +98,11 @@ class DshRuntimeBridge(
                     "Claude subscription login is not supported by DeepSeek Harness. Pick a key-based provider in Settings.",
                 ),
             )
-            RuntimeTaskController.release(sessionId)
+            RuntimeTaskController.finish(sessionId, SessionLifecycle.FAILED)
             return@withContext sessionId
         }
 
+        var sessionSucceeded = false
         var openRouterGateway: OpenRouterRoutingGateway? = null
         runCatching {
             startForegroundRuntime(projectSlug)
@@ -173,6 +174,7 @@ class DshRuntimeBridge(
             // the SDK wrapper alive after acknowledging shutdown, so cleanup may end
             // it with SIGKILL and produce 137 even though the turn completed normally.
             if (sdkResult.completed && sdkResult.failure.isBlank() && !userStopRequested) {
+                sessionSucceeded = true
                 emitCompletedOnce(sessionId)
                 finishForegroundRuntime(
                     completed = true,
@@ -200,7 +202,11 @@ class DshRuntimeBridge(
         openRouterGateway?.close()
         activeProcess = null
         activeSessionId = null
-        RuntimeTaskController.release(sessionId)
+        RuntimeTaskController.finish(sessionId, when {
+            userStopRequested -> SessionLifecycle.CANCELLED
+            sessionSucceeded -> SessionLifecycle.COMPLETED
+            else -> SessionLifecycle.FAILED
+        })
         sessionId
     }
 
