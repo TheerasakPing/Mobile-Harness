@@ -9,6 +9,23 @@ class ExtensionCatalogTest {
     private fun hash(payload: ByteArray) = MessageDigest.getInstance("SHA-256")
         .digest(payload).joinToString("") { "%02x".format(it) }
 
+    @Test fun inventoryShowsVerifiedLocalSkillAndProjectGrants() {
+        val root = Files.createTempDirectory("mh-extension-test").toFile()
+        try {
+            val payload = "# Local skill".toByteArray()
+            val c = ExtensionCatalog(root)
+            c.install(ExtensionManifest("local_skill", "1", ExtensionKind.SKILL,
+                "local://documents/local_skill.md", hash(payload), setOf(ExtensionCapability.WORKSPACE_READ)), payload)
+            assertEquals(1, c.list("project-a").size)
+            assertTrue(c.list("project-a").single().granted.isEmpty())
+            c.enable("project-a", "local_skill", setOf(ExtensionCapability.WORKSPACE_READ))
+            assertEquals(setOf(ExtensionCapability.WORKSPACE_READ), ExtensionCatalog(root).list("project-a").single().granted)
+            assertTrue(ExtensionCatalog(root).list("project-b").single().granted.isEmpty())
+            root.resolve("local_skill.payload").writeText("tampered")
+            assertTrue(c.list("project-a").isEmpty())
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun installChecksChecksumBeforeSaving() {
         val root = Files.createTempDirectory("mh-extension-test").toFile()
         try {
