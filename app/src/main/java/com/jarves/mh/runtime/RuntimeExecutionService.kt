@@ -48,7 +48,7 @@ class RuntimeExecutionService : Service() {
         if (action != ACTION_START && requestTaskId != activeTaskId) return START_NOT_STICKY
         intent?.getStringExtra(EXTRA_PROJECT_NAME)?.takeIf(String::isNotBlank)?.let { projectNameOverride = it }
         intent?.getStringExtra(EXTRA_TITLE)?.takeIf(String::isNotBlank)?.let { notificationTitleOverride = it }
-        if (intent?.hasExtra(EXTRA_CAN_STOP) == true) canStop = intent.getBooleanExtra(EXTRA_CAN_STOP, true)
+        if (action == ACTION_START) canStop = intent?.getBooleanExtra(EXTRA_CAN_STOP, true) ?: true
         when (intent?.action ?: ACTION_START) {
             ACTION_STOP -> {
                 if (requestTaskId.isNullOrBlank() || !RuntimeTaskController.requestStop(requestTaskId)) {
