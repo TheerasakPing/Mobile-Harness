@@ -1515,10 +1515,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     saveAndroidBuildRecord(project.id)
                 }
                 finishAndroidBuildForegroundService(project, message, failed = !cancelled, cancelled = cancelled, taskId = buildTaskId)
-            }.also {
+            }.also { buildResult ->
                 androidBuildProcess = null
+                RuntimeTaskController.finish(buildTaskId, when {
+                    androidBuildStopRequested -> com.jarves.mh.runtime.SessionLifecycle.CANCELLED
+                    buildResult.isSuccess -> com.jarves.mh.runtime.SessionLifecycle.COMPLETED
+                    else -> com.jarves.mh.runtime.SessionLifecycle.FAILED
+                })
                 androidBuildStopRequested = false
-                RuntimeTaskController.release(buildTaskId)
                 steeringToFollowUp = false
                 if (pendingFollowUps.isNotEmpty()) {
                     viewModelScope.launch {
